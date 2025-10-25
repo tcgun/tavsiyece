@@ -7,7 +7,8 @@ import Image from 'next/image';
 import { doc, getDoc, collection, addDoc, query, orderBy, onSnapshot, serverTimestamp, updateDoc, arrayUnion, arrayRemove } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { db, auth } from '../../../firebaseConfig';
-import CommentInput from '../../../components/CommentInput'; // Senin oluşturduğun bileşeni import ediyoruz
+import CommentInput from '../../../components/CommentInput';
+import { createNotification } from '../../../firebase/utils'; // YENİ: Yardımcı fonksiyonu import et
 
 export default function RecommendationDetailPage() {
     const params = useParams();
@@ -19,8 +20,10 @@ export default function RecommendationDetailPage() {
     const [comments, setComments] = useState([]);
     const [loading, setLoading] = useState(true);
     const [currentUserData, setCurrentUserData] = useState(null);
-    const [authChecked, setAuthChecked] = useState(false); // YENİ: Auth durumunun kontrol edilip edilmediğini tutar
+    const [authChecked, setAuthChecked] = useState(false);
     const [newComment, setNewComment] = useState("");
+
+    // ... (diğer useEffect'ler aynı kalacak) ...
 
     useEffect(() => {
         const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
@@ -29,12 +32,12 @@ export default function RecommendationDetailPage() {
                     if (userSnap.exists()) {
                         setCurrentUserData({ uid: user.uid, ...userSnap.data() });
                     }
-                    setAuthChecked(true); // Kullanıcı verisi yüklendi, kontrol tamamlandı
+                    setAuthChecked(true); 
                 });
                 return () => unsubUser();
             } else {
                 setCurrentUserData(null);
-                setAuthChecked(true); // Kullanıcı yok, kontrol tamamlandı
+                setAuthChecked(true);
             }
         });
         return () => unsubscribeAuth();
@@ -71,10 +74,12 @@ export default function RecommendationDetailPage() {
         };
     }, [recId, router]);
     
+
     const handleAddComment = async (e) => {
         e.preventDefault();
         if (!newComment.trim() || !currentUserData) return;
         
+        // Yorumu ekle
         await addDoc(collection(db, "recommendations", recId, "comments"), {
             text: newComment,
             userId: currentUserData.uid,
@@ -83,10 +88,23 @@ export default function RecommendationDetailPage() {
             createdAt: serverTimestamp(),
             likes: []
         });
+
+        // Tavsiye sahibine bildirim gönder
+        await createNotification({
+            recipientId: recommendation.userId, // Tavsiyenin sahibi
+            senderId: currentUserData.uid,
+            senderName: currentUserData.name,
+            senderPhotoURL: currentUserData.photoURL,
+            message: `<strong>${currentUserData.name}</strong> tavsiyene yorum yaptı.`,
+            link: `/tavsiye/${recId}`,
+            imageUrl: recommendation.imageUrl
+        });
+
         setNewComment("");
     };
 
-    const handleLikeRec = async () => {
+    // ... (handleLikeRec ve handleSaveRec aynı kalacak) ...
+     const handleLikeRec = async () => {
         if (!currentUserData) { router.push('/giris'); return; }
         const postRef = doc(db, "recommendations", recId);
         const likes = recommendation.likes || [];
@@ -94,6 +112,16 @@ export default function RecommendationDetailPage() {
             await updateDoc(postRef, { likes: arrayRemove(currentUserData.uid) });
         } else {
             await updateDoc(postRef, { likes: arrayUnion(currentUserData.uid) });
+            // Tavsiye beğenildiğinde bildirim gönder
+            await createNotification({
+                recipientId: recommendation.userId,
+                senderId: currentUserData.uid,
+                senderName: currentUserData.name,
+                senderPhotoURL: currentUserData.photoURL,
+                message: `<strong>${currentUserData.name}</strong> tavsiyeni beğendi.`,
+                link: `/tavsiye/${recId}`,
+                imageUrl: recommendation.imageUrl
+            });
         }
     };
 
@@ -108,22 +136,33 @@ export default function RecommendationDetailPage() {
         }
     };
 
-    const handleLikeComment = async (commentId) => {
+
+    // YORUM BEĞENME FONKSİYONU GÜNCELLENDİ
+    const handleLikeComment = async (comment) => {
         if (!currentUserData) { router.push('/giris'); return; }
 
-        const commentRef = doc(db, "recommendations", recId, "comments", commentId);
-        const commentSnap = await getDoc(commentRef);
+        const commentRef = doc(db, "recommendations", recId, "comments", comment.id);
+        const commentLikes = comment.likes || [];
+        
+        if (commentLikes.includes(currentUserData.uid)) {
+            await updateDoc(commentRef, { likes: arrayRemove(currentUserData.uid) });
+        } else {
+            await updateDoc(commentRef, { likes: arrayUnion(currentUserData.uid) });
 
-        if (commentSnap.exists()) {
-            const commentLikes = commentSnap.data().likes || [];
-            if (commentLikes.includes(currentUserData.uid)) {
-                await updateDoc(commentRef, { likes: arrayRemove(currentUserData.uid) });
-            } else {
-                await updateDoc(commentRef, { likes: arrayUnion(currentUserData.uid) });
-            }
+            // Yorum beğenildiğinde yorum sahibine bildirim gönder
+            await createNotification({
+                recipientId: comment.userId, // Yorumun sahibi
+                senderId: currentUserData.uid,
+                senderName: currentUserData.name,
+                senderPhotoURL: currentUserData.photoURL,
+                message: `<strong>${currentUserData.name}</strong> bir tavsiyedeki yorumunu beğendi.`,
+                link: `/tavsiye/${recId}`, // Yorumun olduğu tavsiyeye link ver
+                imageUrl: recommendation.imageUrl // Tavsiyenin görseli
+            });
         }
     };
 
+    // ... (render kısmı aynı kalacak) ...
     if (loading || !recommendation || !author) {
         return <div className="text-center py-10 flex flex-col items-center justify-center h-screen"><div className="loader"></div></div>;
     }
@@ -213,7 +252,7 @@ export default function RecommendationDetailPage() {
                                             <p className="text-sm text-gray-700">{comment.text}</p>
                                         </div>
                                         <div className="flex items-center space-x-3 mt-1 pl-1">
-                                            <button onClick={() => handleLikeComment(comment.id)} disabled={!currentUserData} className={`text-xs font-semibold ${isCommentLiked ? 'text-red-500' : 'text-gray-500 hover:text-red-500'}`}>
+                                            <button onClick={() => handleLikeComment(comment)} disabled={!currentUserData} className={`text-xs font-semibold ${isCommentLiked ? 'text-red-500' : 'text-gray-500 hover:text-red-500'}`}>
                                                 Beğen
                                             </button>
                                             {comment.likes?.length > 0 && (
@@ -233,7 +272,6 @@ export default function RecommendationDetailPage() {
 
             <footer className="fixed bottom-0 left-0 right-0 bg-white">
                 <div className="container mx-auto max-w-lg">
-                    {/* DÜZELTME BURADA: Artık önce authChecked kontrol ediliyor */}
                     {!authChecked ? (
                         <div className="p-4 text-center text-sm text-gray-500">Yükleniyor...</div>
                     ) : currentUserData ? (
