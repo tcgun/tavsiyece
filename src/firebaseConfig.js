@@ -14,7 +14,10 @@ const firebaseConfig = {
     messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
     appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
 };
-
+// Hata kontrolü eklendi
+if (!firebaseConfig.apiKey) {
+  console.warn("⚠️ Firebase yapılandırması eksik görünüyor (.env.local dosyasını kontrol et)!");
+}
 // Firebase servislerini başlat ve projenin her yerinde kullanmak üzere export et
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
