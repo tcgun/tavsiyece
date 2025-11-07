@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
@@ -66,7 +67,7 @@ export default function MyFollowersPage() {
                         {followers.map(followUser => (
                             <Link key={followUser.id} href={`/profil/${followUser.id}`} className="flex justify-between items-center p-2 rounded-lg hover:bg-gray-50">
                                 <div className="flex items-center space-x-3">
-                                    <img className="w-12 h-12 rounded-full" src={followUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(followUser.name)}&background=random&color=fff`} alt={followUser.name} />
+                                    <Image className="w-12 h-12 rounded-full object-cover" src={followUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(followUser.name)}&background=random&color=fff`} alt={followUser.name} width={48} height={48} unoptimized />
                                     <div>
                                         <p className="font-semibold text-gray-800">{followUser.name}</p>
                                         <p className="text-sm text-gray-500">@{followUser.username}</p>

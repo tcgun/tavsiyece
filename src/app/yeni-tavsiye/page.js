@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, Suspense } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, addDoc, serverTimestamp, doc, getDoc, updateDoc, arrayUnion, query, where, onSnapshot } from 'firebase/firestore';
@@ -141,7 +142,7 @@ const AddRecommendationForm = () => {
                 <div className="space-y-4">
                     {currentUserData && (
                         <div className="flex items-center space-x-3">
-                            <img src={currentUserData.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(currentUserData.name)}&background=random&color=fff`} className="w-10 h-10 rounded-full bg-gray-200" alt="Kullanıcı avatarı" />
+                            <Image src={currentUserData.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(currentUserData.name)}&background=random&color=fff`} className="w-10 h-10 rounded-full bg-gray-200 object-cover" alt="Kullanıcı avatarı" width={40} height={40} unoptimized />
                             <div>
                                 <p className="font-semibold text-gray-800">{currentUserData.name}</p>
                             </div>
@@ -164,7 +165,7 @@ const AddRecommendationForm = () => {
                         <input type="file" ref={fileInputRef} id="image-upload-input" className="hidden" accept="image/png, image/jpeg" onChange={handleFileChange} />
                         {previewUrl ? (
                             <div className="relative w-full h-48">
-                                <img src={previewUrl} className="w-full h-full object-cover rounded-md" alt="Seçilen fotoğrafın önizlemesi" />
+                                <Image src={previewUrl} className="w-full h-full object-cover rounded-md" alt="Seçilen fotoğrafın önizlemesi" fill sizes="100vw" unoptimized />
                                 <button type="button" onClick={removeImage} className="absolute top-2 right-2 bg-black/50 text-white rounded-full w-7 h-7 flex items-center justify-center hover:bg-black/70">
                                     <i className="fas fa-times"></i>
                                 </button>

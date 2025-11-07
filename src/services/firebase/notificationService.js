@@ -207,13 +207,3 @@ export const markAllNotificationsAsRead = async (
     console.error('Tüm bildirimleri okundu olarak işaretleme hatası:', error);
   }
 };
-
-// Explicit exports (for Next.js Turbopack compatibility)
-export {
-  createNotification,
-  createLikeNotification,
-  createCommentNotification,
-  createReplyNotification,
-  markNotificationAsRead,
-  markAllNotificationsAsRead,
-};

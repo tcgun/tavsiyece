@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { onAuthStateChanged } from 'firebase/auth';
 import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
@@ -102,7 +103,7 @@ export default function NewListPage() {
                 <div className="flex flex-col items-center space-y-3">
                     {previewUrl ? (
                          <div className="relative w-24 h-24">
-                            <img src={previewUrl} className="w-24 h-24 rounded-2xl object-cover" alt="Liste önizlemesi" />
+                            <Image src={previewUrl} className="w-24 h-24 rounded-2xl object-cover" alt="Liste önizlemesi" width={96} height={96} unoptimized />
                              <button type="button" onClick={removeImage} className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center hover:bg-red-600">
                                 <i className="fas fa-times text-xs"></i>
                             </button>
