@@ -1,51 +1,61 @@
+'use client';
+
 import { useState, useEffect } from 'react';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
-// --- DÜZELTME: FirebaseConfig yolu düzeltildi (src/hooks -> src) ---
-import { auth, db } from '../firebaseConfig'; // Bir seviye yukarı çıkmak yeterli
+import { collection, query, where, onSnapshot } from 'firebase/firestore';
+import { auth, db } from '../firebaseConfig';
 
-// --- DÜZELTME: export eklendi ---
-export function useUnreadNotifications() {
-// --- DÜZELTME SONU ---
+export const useUnreadNotifications = () => {
     const [unreadCount, setUnreadCount] = useState(0);
-    const [userId, setUserId] = useState(null);
 
-    // Kullanıcı oturumunu dinle
     useEffect(() => {
+        let unsubscribeSnapshot = null;
+
         const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+            // Önceki listener'ı temizle
+            if (unsubscribeSnapshot) {
+                unsubscribeSnapshot();
+                unsubscribeSnapshot = null;
+            }
+
             if (user) {
-                setUserId(user.uid);
+                try {
+                    const notificationsRef = collection(db, "users", user.uid, "notifications");
+                    // Sadece okunmamış (isRead: false) olanları sorgula
+                    const q = query(notificationsRef, where("isRead", "==", false));
+
+                    unsubscribeSnapshot = onSnapshot(
+                        q,
+                        (snapshot) => {
+                            setUnreadCount(snapshot.size); // Okunmamış belge sayısını ayarla
+                        },
+                        (error) => {
+                            // Permission hatası veya diğer hatalar durumunda
+                            if (error.code === 'permission-denied') {
+                                console.log("Bildirimler için yetki hatası:", error);
+                                setUnreadCount(0);
+                            } else {
+                                console.error("Bildirimler dinlenirken hata:", error);
+                                setUnreadCount(0);
+                            }
+                        }
+                    );
+                } catch (error) {
+                    console.error("Bildirimler sorgusu oluşturulurken hata:", error);
+                    setUnreadCount(0);
+                }
             } else {
-                setUserId(null);
-                setUnreadCount(0); // Kullanıcı yoksa sayacı sıfırla
+                setUnreadCount(0);
             }
         });
-        return () => unsubscribeAuth();
+
+        return () => {
+            if (unsubscribeSnapshot) {
+                unsubscribeSnapshot();
+            }
+            unsubscribeAuth();
+        };
     }, []);
 
-    // Kullanıcı ID'si değiştiğinde veya geldiğinde bildirimleri dinle
-    useEffect(() => {
-        if (!userId) {
-            setUnreadCount(0); // Kullanıcı ID'si yoksa sıfırla
-            return; // Listener'ı başlatma
-        }
-
-        // Okunmamış bildirimleri sorgula
-        const notificationsRef = collection(db, "users", userId, "notifications");
-        const q = query(notificationsRef, where("isRead", "==", false));
-
-        // Değişiklikleri dinle
-        const unsubscribeNotifications = onSnapshot(q, (snapshot) => {
-            setUnreadCount(snapshot.size); // Okunmamış belge sayısını state'e ata
-        }, (error) => {
-            console.error("Okunmamış bildirimler dinlenirken hata:", error);
-            setUnreadCount(0); // Hata durumunda sıfırla
-        });
-
-        // Component kaldırıldığında veya userId değiştiğinde listener'ı temizle
-        return () => unsubscribeNotifications();
-
-    }, [userId]); // Sadece userId değiştiğinde çalıştır
-
-    return unreadCount; // Okunmamış bildirim sayısını döndür
-}
+    return unreadCount;
+};

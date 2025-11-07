@@ -1,155 +1,314 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import Image from 'next/image'; // Next.js Image bileşenini import ediyoruz
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { onAuthStateChanged } from 'firebase/auth';
-import { collection, query, orderBy, onSnapshot, doc, updateDoc, writeBatch } from 'firebase/firestore';
-import { auth, db } from '../../firebaseConfig';
+import { collection, documentId, getDocs, limit, orderBy, query, where } from 'firebase/firestore';
+import { db } from '../../firebaseConfig';
+import { useAuth } from '../../contexts/AuthContext';
+import { markAllNotificationsAsRead, markNotificationAsRead } from '../../services/firebase/notificationService';
+import { formatRelativeTime, getAvatarUrlWithFallback } from '../../utils';
 
-export default function NotificationsPage() {
+// Bildirim Öğesi
+const NotificationItem = ({ item, onMarkAsRead }) => {
     const router = useRouter();
+    const [isRead, setIsRead] = useState(item.isRead);
+
+    const markAsRead = async () => {
+        if (isRead) return;
+        setIsRead(true);
+        await onMarkAsRead(item.id);
+    };
+
+    const handlePress = async () => {
+        await markAsRead();
+
+        if (item.linkPath === '/tavsiye/[id]' || item.linkPath === '/recommendation/[id]') {
+            router.push(`/tavsiye/${item.linkParams.id}`);
+        }
+    };
+
+    const containerClass = isRead
+        ? 'bg-[#1C1424]'
+        : 'bg-[#2a1f3d]';
+
+    return (
+        <button
+            onClick={handlePress}
+            className={`w-full flex items-start gap-4 p-4 border-b border-[rgba(255,255,255,0.1)] hover:bg-[#2a1f3d] transition-colors ${containerClass}`}
+        >
+            {/* Avatar */}
+            <div className="relative flex-shrink-0">
+                <Image
+                    src={item.sender.avatar}
+                    alt={item.sender.name}
+                    width={48}
+                    height={48}
+                    className="rounded-full object-cover"
+                    unoptimized
+                />
+                {!isRead && (
+                    <span className="absolute top-0 right-0 block h-3 w-3 rounded-full bg-[#BA68C8] ring-2 ring-[#1C1424]"></span>
+                )}
+            </div>
+
+            {/* Metin */}
+            <div className="flex-1 text-left">
+                <p className="text-[#f8fafc] text-sm leading-6">
+                    <span className="font-bold">{item.sender.name}</span>
+                    {` ${item.message}`}
+                    {item.commentText && (
+                        <span className="text-[#9ca3af]">{`: "${item.commentText}"`}</span>
+                    )}
+                </p>
+                <p className="text-xs text-[#9ca3af] mt-1">
+                    {formatRelativeTime(item.createdAt)}
+                </p>
+            </div>
+
+            {/* Görsel */}
+            {item.imageUrl && (
+                <Image
+                    src={item.imageUrl}
+                    alt="İlgili gönderi"
+                    width={48}
+                    height={48}
+                    className="rounded-lg object-cover flex-shrink-0"
+                    unoptimized
+                />
+            )}
+        </button>
+    );
+};
+
+// Ana Ekran
+export default function NotificationsPage() {
+    const { user: authUser, isLoading: authLoading } = useAuth();
+    const router = useRouter();
+
     const [notifications, setNotifications] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [currentUser, setCurrentUser] = useState(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [error, setError] = useState(null);
+
+    // Tümünü Okundu Yap
+    const markAllAsRead = async () => {
+        if (!authUser?.uid || notifications.length === 0) return;
+
+        // UI anında güncelle
+        setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+
+        // Firestore batch güncellemesi
+        try {
+            await markAllNotificationsAsRead(authUser.uid);
+        } catch (err) {
+            console.warn('Tüm bildirimler okundu olarak işaretlenemedi:', err);
+        }
+    };
+
+    // Tek bildirimi okundu yap
+    const handleMarkAsRead = async (notificationId) => {
+        if (!authUser?.uid) return;
+        try {
+            await markNotificationAsRead(authUser.uid, notificationId);
+        } catch (err) {
+            console.warn('Bildirim okundu olarak işaretlenemedi:', err);
+        }
+    };
 
     useEffect(() => {
-        const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
-            if (user) {
-                setCurrentUser(user);
-                const notificationsRef = collection(db, "users", user.uid, "notifications");
-                const q = query(notificationsRef, orderBy("createdAt", "desc"));
+        const fetchNotifications = async () => {
+            setIsLoading(true);
+            setError(null);
 
-                const unsubscribeNotifications = onSnapshot(q, (snapshot) => {
-                    const notifsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    setNotifications(notifsData);
-                    setLoading(false);
+            if (!authUser?.uid) {
+                setError('Bildirimleri görmek için giriş yapmalısınız.');
+                setIsLoading(false);
+                return;
+            }
+
+            try {
+                const notifQuery = query(
+                    collection(db, 'users', authUser.uid, 'notifications'),
+                    orderBy('createdAt', 'desc'),
+                    limit(30)
+                );
+                const notifSnapshot = await getDocs(notifQuery);
+
+                if (notifSnapshot.empty) {
+                    setNotifications([]);
+                    setIsLoading(false);
+                    return;
+                }
+
+                const fetchedNotifs = [];
+                const senderIds = new Set();
+
+                notifSnapshot.forEach(doc => {
+                    const data = doc.data();
+                    fetchedNotifs.push({ id: doc.id, ...data });
+                    if (data.senderId && typeof data.senderId === 'string') senderIds.add(data.senderId);
                 });
 
-                return () => unsubscribeNotifications();
-            } else {
-                router.push('/giris');
+                const userMap = new Map();
+                if (senderIds.size > 0) {
+                    const userIdsArray = Array.from(senderIds);
+                    const promises = [];
+                    
+                    // Paralel sorgularla kullanıcı verilerini çek
+                    for (let i = 0; i < userIdsArray.length; i += 10) {
+                        const batch = userIdsArray.slice(i, i + 10);
+                        const usersQuery = query(
+                            collection(db, 'users'),
+                            where(documentId(), 'in', batch)
+                        );
+                        promises.push(getDocs(usersQuery));
+                    }
+                    
+                    const snapshots = await Promise.all(promises);
+                    snapshots.forEach(snapshot => {
+                        snapshot.forEach((doc) => {
+                            const data = doc.data();
+                            userMap.set(doc.id, {
+                                name: data.name || data.username || 'Bilinmeyen',
+                                photoURL: data.photoURL || getAvatarUrlWithFallback(null, data.name, data.username),
+                            });
+                        });
+                    });
+                }
+
+                const finalNotifications = fetchedNotifs.map(notif => {
+                    const senderInfo = userMap.get(notif.senderId);
+
+                    let messageText = 'yeni bir bildirim gönderdi.';
+                    if (notif.type === 'Begeniler') messageText = 'tavsiyeni beğendi.';
+                    if (notif.type === 'Yorumlar') messageText = 'tavsiyene yorum yaptı';
+                    if (notif.type === 'Yanitlar') messageText = 'yorumuna yanıt verdi';
+                    if (notif.type === 'Takip') messageText = 'seni takip etmeye başladı.';
+
+                    let commentText;
+                    if (notif.type === 'Yorumlar' && typeof notif.message === 'string' && notif.message.includes(': "')) {
+                        try {
+                            commentText = notif.message.split(': "')[1]?.slice(0, -1);
+                        } catch {}
+                    }
+
+                    let finalLinkPath = '/bildirimler';
+                    let finalLinkParams = {};
+
+                    if (notif.link && typeof notif.link === 'string' && (notif.link.startsWith('/recommendation/') || notif.link.startsWith('/tavsiye/'))) {
+                        const parts = notif.link.split('/');
+                        const recId = parts[parts.length - 1];
+                        if (recId) {
+                            finalLinkPath = '/tavsiye/[id]';
+                            finalLinkParams = { id: recId };
+                        }
+                    }
+
+                    return {
+                        id: notif.id,
+                        type: notif.type,
+                        sender: {
+                            id: notif.senderId,
+                            name: senderInfo?.name || notif.senderName || 'Biri',
+                            avatar: getAvatarUrlWithFallback(
+                                senderInfo?.photoURL || notif.senderPhotoURL,
+                                senderInfo?.name || notif.senderName,
+                                undefined
+                            ),
+                        },
+                        linkPath: finalLinkPath,
+                        linkParams: finalLinkParams,
+                        imageUrl: notif.imageUrl || null,
+                        message: messageText,
+                        commentText: commentText,
+                        createdAt: notif.createdAt,
+                        isRead: notif.isRead,
+                    };
+                });
+
+                setNotifications(finalNotifications);
+            } catch (err) {
+                console.error('Bildirimler çekilirken hata:', err);
+                setError('Bildirimler yüklenemedi: ' + err.message);
+            } finally {
+                setIsLoading(false);
             }
-        });
-        return () => unsubscribeAuth();
-    }, [router]);
+        };
 
-    const handleNotificationClick = async (notifId) => {
-        if (!currentUser) return;
-        const notifRef = doc(db, "users", currentUser.uid, "notifications", notifId);
-        try {
-            await updateDoc(notifRef, {
-                isRead: true
-            });
-        } catch (error) {
-            console.error("Bildirim güncellenirken hata:", error);
+        if (!authLoading && authUser) {
+            fetchNotifications();
+        } else if (!authLoading && !authUser) {
+            router.push('/giris');
         }
-    };
-    
-    const handleMarkAllAsRead = async () => {
-        if (!currentUser || notifications.length === 0) return;
+    }, [authUser, authLoading, router]);
 
-        const batch = writeBatch(db);
-        notifications.forEach(notif => {
-            if (!notif.isRead) {
-                const notifRef = doc(db, "users", currentUser.uid, "notifications", notif.id);
-                batch.update(notifRef, { "isRead": true });
-            }
-        });
+    const hasUnreadNotifications = notifications.some(notif => !notif.isRead);
 
-        try {
-            await batch.commit();
-        } catch (error) {
-            console.error("Tüm bildirimler okunurken hata:", error);
-        }
-    };
-
-
-    if (loading) {
+    if (authLoading || isLoading) {
         return (
-            <div className="flex justify-center items-center h-screen">
+            <div className="w-full min-h-screen bg-[#1C1424] flex items-center justify-center">
                 <div className="loader"></div>
             </div>
         );
     }
 
-    // Bu alt bileşeni, ana bileşenin dışında tanımlamak daha temiz bir yöntemdir.
-    const NotificationItem = ({ notif }) => {
-        const timeAgo = notif.createdAt ? new Date(notif.createdAt.seconds * 1000).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long' }) : '';
-        
-        const itemClass = notif.isRead ? 'bg-white' : 'bg-teal-50';
-
+    if (error) {
         return (
-            <Link 
-                href={notif.link || '#'} 
-                className={`flex items-center space-x-4 p-4 hover:bg-gray-100 transition-colors ${itemClass}`}
-                onClick={() => handleNotificationClick(notif.id)}
-            >
-                <div className="relative">
-                    <Image 
-                        className="w-12 h-12 rounded-full object-cover" 
-                        src={notif.senderPhotoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(notif.senderName)}&background=random&color=fff`} 
-                        alt={notif.senderName}
-                        width={48}
-                        height={48}
-                        unoptimized
-                    />
-                    {!notif.isRead && (
-                        <span className="absolute top-0 right-0 block h-3 w-3 rounded-full bg-teal-500 ring-2 ring-white"></span>
-                    )}
-                </div>
-
-                <div className="flex-grow">
-                    <p className="text-sm text-gray-800" dangerouslySetInnerHTML={{ __html: notif.message }}></p>
-                    <p className="text-xs text-gray-400 mt-1">{timeAgo}</p>
-                </div>
-                {notif.imageUrl && (
-                     <Image 
-                        src={notif.imageUrl} 
-                        className="w-12 h-12 rounded-lg object-cover flex-shrink-0" 
-                        alt="İlgili gönderi"
-                        width={48}
-                        height={48}
-                    />
-                )}
-            </Link>
+            <div className="w-full min-h-screen bg-[#1C1424] flex flex-col items-center justify-center p-4">
+                <i className="fas fa-exclamation-circle text-4xl text-red-500 mb-4"></i>
+                <p className="text-red-500 text-center">{error}</p>
+            </div>
         );
-    };
-
-    const hasUnreadNotifications = notifications.some(notif => !notif.isRead);
+    }
 
     return (
-        <div>
-             <header className="sticky top-0 z-10 bg-white/90 backdrop-blur-sm shadow-sm">
-                 <div className="p-4 flex justify-between items-center">
-                    <div className="w-24"></div>
-                    <h1 className="text-xl font-bold text-gray-800">Bildirimler</h1>
+        <div className="w-full min-h-screen bg-[#1C1424] pb-20">
+            <header className="sticky top-0 z-10 bg-[#1C1424]/90 backdrop-blur-sm shadow-sm border-b border-[rgba(255,255,255,0.1)]">
+                <div className="p-4 flex justify-between items-center">
+                    <button
+                        onClick={() => router.back()}
+                        className="text-[#9ca3af] hover:bg-[#2a1f3d] w-10 h-10 flex items-center justify-center rounded-full transition-colors"
+                    >
+                        <i className="fas fa-arrow-left text-lg"></i>
+                    </button>
+                    <h1 className="text-xl font-bold text-[#f8fafc]">Bildirimler</h1>
                     <div className="w-24 text-right">
                         {hasUnreadNotifications && (
-                            <button onClick={handleMarkAllAsRead} className="text-sm font-semibold text-teal-600 hover:text-teal-800">
-                                Hepsini Oku
+                            <button
+                                onClick={markAllAsRead}
+                                className="text-sm font-semibold text-[#BA68C8] hover:text-[#9c4fb8]"
+                            >
+                                <i className="fas fa-check-double"></i>
                             </button>
                         )}
                     </div>
                 </div>
             </header>
-            <main className="divide-y divide-gray-100">
-                {notifications.length > 0 ? (
-                    notifications.map(notif => <NotificationItem key={notif.id} notif={notif} />)
-                ) : (
-                    <div className="text-center py-20 flex flex-col items-center">
-                        <div className="w-24 h-24 bg-teal-100 rounded-full flex items-center justify-center">
-                            <i className="far fa-bell-slash text-4xl text-teal-500"></i>
+
+            <main>
+                {notifications.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-20 px-4">
+                        <div className="w-24 h-24 bg-[#BA68C8]/20 rounded-full flex items-center justify-center mb-6">
+                            <i className="fas fa-bell-slash text-4xl text-[#BA68C8]"></i>
                         </div>
-                        <h2 className="mt-6 text-xl font-bold text-gray-800">Hiç Bildirimin Yok</h2>
-                        <p className="mt-2 text-sm text-gray-600 max-w-xs">
-                            Uygulamada etkileşime girdikçe bildirimlerin burada görünecek.
+                        <h2 className="text-xl font-bold text-[#f8fafc] mb-2">Henüz bir bildirimin yok.</h2>
+                        <p className="text-sm text-[#9ca3af] text-center max-w-xs">
+                            Yeni tavsiyeler keşfetmeye ve insanlarla etkileşime geçmeye ne dersin?
                         </p>
+                    </div>
+                ) : (
+                    <div className="divide-y divide-[rgba(255,255,255,0.1)]">
+                        {notifications.map(notif => (
+                            <NotificationItem
+                                key={notif.id}
+                                item={notif}
+                                onMarkAsRead={handleMarkAsRead}
+                            />
+                        ))}
                     </div>
                 )}
             </main>
         </div>
     );
-};
-
+}
