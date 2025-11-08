@@ -102,14 +102,6 @@ const RecommendationCard = ({ rec, currentUserData, onLike, onSave, onDelete }) 
                     <p className="text-muted text-sm line-clamp-3 mb-3">{postText}</p>
                 </div>
 
-                {/* Liste Linki (varsa) */}
-                {rec.listLink && (
-                    <div className="mt-1">
-                        <Link href={rec.listLink} onClick={(e) => e.stopPropagation()} className="text-sm font-semibold text-primary hover:text-primary-dark transition-colors">
-                            Listeyi Görüntüle →
-                        </Link>
-                    </div>
-                )}
             </div>
 
             {/* Resim */}

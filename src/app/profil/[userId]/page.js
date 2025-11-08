@@ -4,126 +4,407 @@ import React, { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
-import { doc, onSnapshot, updateDoc, arrayUnion, arrayRemove, collection, query, where, orderBy, writeBatch } from 'firebase/firestore';
-import { auth, db } from '../../../firebaseConfig';
-import { onAuthStateChanged } from 'firebase/auth';
-import { createNotification } from '../../../firebase/utils';
+import { doc, getDoc, getDocs, collection, query, where, orderBy, writeBatch, serverTimestamp } from 'firebase/firestore';
+import { db } from '../../../firebaseConfig';
+import { useAuth } from '../../../contexts/AuthContext';
+import { getFollowers, getFollowing, getUserProfile } from '../../../services/firebase/userService';
+import { isRecommendationSaved, likeRecommendation, saveRecommendation, unlikeRecommendation, unsaveRecommendation } from '../../../services/firebase/recommendationService';
+import { createNotification, createLikeNotification } from '../../../services/firebase/notificationService';
+import { getAvatarUrlWithFallback } from '../../../utils/avatarUtils';
+import RecommendationCard from '../../../components/RecommendationCard';
+import Header from '../../../components/layout/Header';
+import Sidebar from '../../../components/layout/Sidebar';
+import { useUnreadNotifications } from '../../../hooks/useUnreadNotifications';
+import { useSidebar } from '../../../hooks/useSidebar';
 
 export default function OtherProfilePage() {
     const params = useParams();
     const router = useRouter();
+    const { user: authUser, isLoading: authLoading } = useAuth();
     const { userId } = params;
+    const unreadCount = useUnreadNotifications();
 
     const [profileUser, setProfileUser] = useState(null);
     const [recommendations, setRecommendations] = useState([]);
-    const [currentUserData, setCurrentUserData] = useState(null);
-    const [loading, setLoading] = useState(true);
     const [isFollowing, setIsFollowing] = useState(false);
     const [followLoading, setFollowLoading] = useState(false);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+    
+    // Sidebar için state'ler
+    const [categories, setCategories] = useState([]);
+    const [userProfile, setUserProfile] = useState(null);
+    const [followersCount, setFollowersCount] = useState(0);
+    const [followingCount, setFollowingCount] = useState(0);
+    const [recommendationsCount, setRecommendationsCount] = useState(0);
+    const sidebarHook = useSidebar(authUser);
 
-    // Giriş yapmış kullanıcıyı ve takip durumunu dinle
+    // Kendi profilimiz kontrolü
     useEffect(() => {
-        const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
-            if (user) {
-                if (user.uid === userId) {
-                    router.push('/profil');
-                    return;
-                }
-                const unsubUser = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
-                    if (docSnap.exists()){
-                        const userData = { uid: user.uid, ...docSnap.data() };
-                        setCurrentUserData(userData);
-                        setIsFollowing(userData.following?.includes(userId) || false);
-                    } else {
-                        setCurrentUserData({ uid: user.uid });
-                        setIsFollowing(false);
-                        console.warn("Giriş yapmış kullanıcının Firestore verisi bulunamadı:", user.uid);
-                    }
-                }, (error) => {
-                    console.error("Mevcut kullanıcı verisi dinlenirken hata:", error);
-                    setCurrentUserData(null);
-                    setIsFollowing(false);
-                });
-                return () => unsubUser();
-            } else {
-                router.push('/giris');
-            }
-        });
-        return () => unsubscribeAuth();
-    }, [userId, router]);
+        if (!authLoading && authUser && authUser.uid === userId) {
+            router.push('/profil');
+        }
+    }, [authUser, userId, authLoading, router]);
 
-    // Profil ve tavsiyeleri dinle
+    // Kategorileri çek
+    useEffect(() => {
+        const fetchCategories = async () => {
+            try {
+                const catQuery = query(collection(db, 'categories'), orderBy('order', 'asc'));
+                const catSnapshot = await getDocs(catQuery);
+                if (!catSnapshot.empty) {
+                    const fetchedCategories = catSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    setCategories(fetchedCategories);
+                }
+            } catch (err) {
+                try {
+                    const catQuery = query(collection(db, 'categories'));
+                    const catSnapshot = await getDocs(catQuery);
+                    const fetchedCategories = catSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    setCategories(fetchedCategories);
+                } catch (queryError) {
+                    setCategories([]);
+                }
+            }
+        };
+        fetchCategories();
+    }, []);
+
+    // Kendi profil bilgilerini çek (Sidebar için)
+    useEffect(() => {
+        const fetchProfile = async () => {
+            if (!authUser?.uid) return;
+            
+            try {
+                // Önce tavsiye sayısını senkronize et (önceki tavsiyeleri de saysın)
+                // İzin hatası durumunda sessizce devam et
+                let syncedCount = null;
+                try {
+                    const { syncRecommendationsCount } = await import('../../../services/firebase/userService');
+                    syncedCount = await syncRecommendationsCount(authUser.uid);
+                } catch (syncError) {
+                    // İzin hatası veya başka bir hata - sessizce devam et
+                    console.warn("Tavsiye sayısı senkronize edilemedi (devam ediliyor):", syncError);
+                }
+                
+                const profile = await getUserProfile(authUser.uid);
+                if (profile) {
+                    setUserProfile(profile);
+                    // Senkronize edilmiş count'u kullan (eğer varsa), yoksa mevcut count'u kullan
+                    const finalCount = syncedCount !== null && syncedCount !== undefined 
+                        ? syncedCount 
+                        : (profile.recommendationsCount !== undefined && profile.recommendationsCount !== null 
+                            ? profile.recommendationsCount 
+                            : 0);
+                    setRecommendationsCount(finalCount);
+                    
+                    // Takipçi ve takip sayılarını senkronize et
+                    let syncedFollowCounts = null;
+                    try {
+                        const { syncFollowCounts } = await import('../../../services/firebase/userService');
+                        syncedFollowCounts = await syncFollowCounts(authUser.uid);
+                    } catch (syncError) {
+                        console.warn("Takip/takipçi sayıları senkronize edilemedi (devam ediliyor):", syncError);
+                    }
+                    
+                    // Senkronize edilmiş count'ları kullan (eğer varsa), yoksa mevcut count'ları veya listelerden hesapla
+                    let finalFollowersCount = 0;
+                    let finalFollowingCount = 0;
+                    
+                    if (syncedFollowCounts) {
+                        finalFollowersCount = syncedFollowCounts.followersCount;
+                        finalFollowingCount = syncedFollowCounts.followingCount;
+                    } else {
+                        // Fallback: Profil'den veya listelerden hesapla
+                        const [followersList, followingList] = await Promise.all([
+                            getFollowers(authUser.uid, 1000),
+                            getFollowing(authUser.uid, 1000)
+                        ]);
+                        finalFollowersCount = profile.followersCount !== undefined && profile.followersCount !== null 
+                            ? profile.followersCount 
+                            : followersList.length;
+                        finalFollowingCount = profile.followingCount !== undefined && profile.followingCount !== null 
+                            ? profile.followingCount 
+                            : followingList.length;
+                    }
+                    
+                    setFollowersCount(finalFollowersCount);
+                    setFollowingCount(finalFollowingCount);
+                }
+            } catch (err) {
+                console.error("Profil çekilirken hata:", err);
+            }
+        };
+        
+        if (!authLoading && authUser) {
+            fetchProfile();
+        }
+    }, [authUser, authLoading]);
+
+    // Diğer kullanıcının profilini çek
     useEffect(() => {
         if (!userId) return;
 
-        setLoading(true);
+        const fetchProfile = async () => {
+            setLoading(true);
+            setError(null);
 
-        const unsubProfile = onSnapshot(doc(db, "users", userId), (docSnap) => {
-            if (docSnap.exists()) {
-                setProfileUser({ uid: docSnap.id, ...docSnap.data() });
-            } else {
-                console.error("Profil kullanıcısı bulunamadı:", userId);
-                setProfileUser(null);
-                router.push('/');
+            try {
+                // Profil kullanıcısını çek
+                // Önce tavsiye sayısını senkronize et (önceki tavsiyeleri de saysın)
+                // İzin hatası durumunda sessizce devam et
+                let syncedCount = null;
+                try {
+                    const { syncRecommendationsCount } = await import('../../../services/firebase/userService');
+                    syncedCount = await syncRecommendationsCount(userId);
+                } catch (syncError) {
+                    // İzin hatası veya başka bir hata - sessizce devam et
+                    console.warn("Tavsiye sayısı senkronize edilemedi (devam ediliyor):", syncError);
+                }
+                
+                const profileData = await getUserProfile(userId);
+                if (!profileData) {
+                    setError("Kullanıcı bulunamadı.");
+                    setLoading(false);
+                    router.push('/');
+                    return;
+                }
+
+                // Senkronize edilmiş count'u kullan (eğer varsa), yoksa mevcut count'u kullan
+                const finalCount = syncedCount !== null && syncedCount !== undefined 
+                    ? syncedCount 
+                    : (profileData.recommendationsCount !== undefined && profileData.recommendationsCount !== null 
+                        ? profileData.recommendationsCount 
+                        : 0);
+                
+                // Takipçi ve takip sayılarını senkronize et
+                let syncedFollowCounts = null;
+                try {
+                    const { syncFollowCounts } = await import('../../../services/firebase/userService');
+                    syncedFollowCounts = await syncFollowCounts(userId);
+                } catch (syncError) {
+                    console.warn("Takip/takipçi sayıları senkronize edilemedi (devam ediliyor):", syncError);
+                }
+                
+                // Senkronize edilmiş count'ları kullan (eğer varsa), yoksa mevcut count'ları kullan
+                let finalFollowersCount = 0;
+                let finalFollowingCount = 0;
+                
+                if (syncedFollowCounts) {
+                    finalFollowersCount = syncedFollowCounts.followersCount;
+                    finalFollowingCount = syncedFollowCounts.followingCount;
+                } else {
+                    // Fallback: Profil'den al
+                    finalFollowersCount = profileData.followersCount !== undefined && profileData.followersCount !== null 
+                        ? profileData.followersCount 
+                        : 0;
+                    finalFollowingCount = profileData.followingCount !== undefined && profileData.followingCount !== null 
+                        ? profileData.followingCount 
+                        : 0;
+                }
+                
+                // profileUser state'ini güncellenmiş count'larla birlikte set et
+                setProfileUser({
+                    ...profileData,
+                    recommendationsCount: finalCount,
+                    followersCount: finalFollowersCount,
+                    followingCount: finalFollowingCount
+                });
+                
+                setRecommendationsCount(finalCount);
+                setFollowersCount(finalFollowersCount);
+                setFollowingCount(finalFollowingCount);
+
+                // Takip durumunu kontrol et
+                if (authUser?.uid) {
+                    const followingRef = doc(db, 'users', authUser.uid, 'following', userId);
+                    const followingSnap = await getDoc(followingRef);
+                    setIsFollowing(followingSnap.exists());
+                }
+
+                // Tavsiyeleri çek
+                const recsQuery = query(
+                    collection(db, 'recommendations'),
+                    where('userId', '==', userId),
+                    orderBy('createdAt', 'desc')
+                );
+                const recsSnapshot = await getDocs(recsQuery);
+                
+                const recommendationIds = recsSnapshot.docs.map(doc => doc.id);
+                const countsMap = new Map();
+                const likedRecommendationIds = new Set();
+
+                if (recommendationIds.length > 0 && authUser?.uid) {
+                    // Beğeni durumunu kontrol et
+                    const likesPromises = recommendationIds.map(async (recId) => {
+                        const likeRef = doc(db, 'recommendations', recId, 'likes', authUser.uid);
+                        const likeSnap = await getDoc(likeRef);
+                        return { recId, isLiked: likeSnap.exists() };
+                    });
+                    const likesResults = await Promise.all(likesPromises);
+                    likesResults.forEach(({ recId, isLiked }) => {
+                        if (isLiked) likedRecommendationIds.add(recId);
+                    });
+
+                    // Beğeni ve yorum sayılarını çek
+                    const countPromises = recommendationIds.map(async (recId) => {
+                        try {
+                            const [likesSnap, commentsSnap] = await Promise.all([
+                                getDocs(collection(db, 'recommendations', recId, 'likes')),
+                                getDocs(collection(db, 'recommendations', recId, 'comments'))
+                            ]);
+                            return {
+                                id: recId,
+                                likeCount: likesSnap.size,
+                                commentCount: commentsSnap.size
+                            };
+                        } catch (error) {
+                            console.error(`Sayılar çekilirken hata (${recId}):`, error);
+                            return { id: recId, likeCount: 0, commentCount: 0 };
+                        }
+                    });
+
+                    const counts = await Promise.all(countPromises);
+                    counts.forEach(count => {
+                        countsMap.set(count.id, { likeCount: count.likeCount, commentCount: count.commentCount });
+                    });
+                }
+
+                const fetchedRecs = [];
+                recsSnapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const counts = countsMap.get(doc.id) || { likeCount: 0, commentCount: 0 };
+                    const isLiked = likedRecommendationIds.has(doc.id);
+                    
+                    fetchedRecs.push({
+                        id: doc.id,
+                        title: data.title || 'Başlıksız',
+                        text: data.text || '',
+                        category: data.category || 'Kategori Yok',
+                        userId: userId,
+                        image: data.imageUrl || data.image || null,
+                        imageUrl: data.imageUrl || data.image || null,
+                        user: {
+                            name: profileData?.name || profileData?.username || 'Kullanıcı',
+                            avatar: getAvatarUrlWithFallback(profileData?.photoURL, profileData?.name, profileData?.username),
+                        },
+                        isLiked: isLiked,
+                        likeCount: counts.likeCount,
+                        commentCount: counts.commentCount,
+                        createdAt: data.createdAt,
+                    });
+                });
+                setRecommendations(fetchedRecs);
+            } catch (err) {
+                console.error("Profil verisi çekme hatası:", err.message);
+                setError("Profil yüklenirken bir hata oluştu.");
+            } finally {
+                setLoading(false);
             }
-        }, (error) => {
-            console.error("Profil kullanıcısı dinlenirken hata:", error);
-            setLoading(false);
-            setProfileUser(null);
-        });
-
-        const recsQuery = query(
-            collection(db, "recommendations"),
-            where("userId", "==", userId),
-            orderBy("createdAt", "desc")
-        );
-
-        const unsubRecs = onSnapshot(recsQuery, (querySnapshot) => {
-            const recsData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setRecommendations(recsData);
-            setLoading(false);
-        }, (error) => {
-            console.error("Profil tavsiyeleri dinlenirken hata:", error);
-            setLoading(false);
-        });
-
-        return () => {
-            unsubProfile();
-            unsubRecs();
         };
-    }, [userId, router]);
+
+        if (!authLoading) {
+            fetchProfile();
+        }
+    }, [userId, authUser?.uid, authLoading, router]);
 
     // Takip Et / Takibi Bırak
     const handleFollowToggle = async () => {
-        if (!currentUserData || !profileUser || followLoading) return;
+        if (!authUser?.uid || !profileUser || followLoading) {
+            if (!authUser) {
+                router.push('/giris');
+            }
+            return;
+        }
 
         setFollowLoading(true);
 
-        const currentUserRef = doc(db, "users", currentUserData.uid);
-        const profileUserRef = doc(db, "users", profileUser.uid);
-        const batch = writeBatch(db);
+        // Eski takip durumunu sakla (state güncellemesinden önce)
+        const wasFollowing = isFollowing;
+        // Yeni takip durumu (tersi)
+        const willFollow = !wasFollowing;
 
         try {
-            if (isFollowing) {
-                batch.update(currentUserRef, { following: arrayRemove(profileUser.uid) });
-                batch.update(profileUserRef, { followers: arrayRemove(currentUserData.uid) });
+            const currentUserFollowingRef = doc(db, 'users', authUser.uid, 'following', userId);
+            const profileUserFollowersRef = doc(db, 'users', userId, 'followers', authUser.uid);
+            const batch = writeBatch(db);
+
+            if (wasFollowing) {
+                // Takibi bırak
+                batch.delete(currentUserFollowingRef);
+                batch.delete(profileUserFollowersRef);
             } else {
-                batch.update(currentUserRef, { following: arrayUnion(profileUser.uid) });
-                batch.update(profileUserRef, { followers: arrayUnion(currentUserData.uid) });
+                // Takip et
+                batch.set(currentUserFollowingRef, { createdAt: serverTimestamp() });
+                batch.set(profileUserFollowersRef, { createdAt: serverTimestamp() });
 
                 // Bildirim gönderme
-                await createNotification({
-                    recipientId: profileUser.uid,
-                    senderId: currentUserData.uid,
-                    senderName: currentUserData.name || 'Bilinmeyen Kullanıcı',
-                    senderPhotoURL: currentUserData.photoURL || null,
-                    message: `<strong>${currentUserData.name || 'Biri'}</strong> seni takip etmeye başladı.`,
-                    link: `/profil/${currentUserData.uid}`,
-                    type: 'yeniTakipciler'
-                });
+                if (authUser.uid !== userId) {
+                    try {
+                        const currentUserProfile = await getUserProfile(authUser.uid);
+                        await createNotification({
+                            recipientId: userId,
+                            senderId: authUser.uid,
+                            senderName: currentUserProfile?.name || 'Bilinmeyen Kullanıcı',
+                            senderPhotoURL: currentUserProfile?.photoURL || null,
+                            message: `<strong>${currentUserProfile?.name || 'Biri'}</strong> seni takip etmeye başladı.`,
+                            link: `/profil/${authUser.uid}`,
+                            type: 'Takip'
+                        });
+                    } catch (notifError) {
+                        console.error("Bildirim gönderme hatası:", notifError);
+                    }
+                }
             }
 
             await batch.commit();
+            
+            // Takip/takipçi sayılarını güncelle
+            try {
+                const { updateDoc, increment } = await import('firebase/firestore');
+                
+                // Kendi profilimizin followingCount'unu güncelle
+                // wasFollowing true ise -1 (takibi bıraktık), false ise +1 (takip ettik)
+                const currentUserDocRef = doc(db, 'users', authUser.uid);
+                await updateDoc(currentUserDocRef, {
+                    followingCount: increment(wasFollowing ? -1 : 1)
+                });
+                
+                // Diğer kullanıcının followersCount'unu güncelle
+                // wasFollowing true ise -1 (takibi bıraktık), false ise +1 (takip ettik)
+                const profileUserDocRef = doc(db, 'users', userId);
+                await updateDoc(profileUserDocRef, {
+                    followersCount: increment(wasFollowing ? -1 : 1)
+                });
+                
+                // State'leri güncelle
+                // Diğer kullanıcının followersCount'unu güncelle
+                if (profileUser) {
+                    const newFollowersCount = Math.max(0, (profileUser.followersCount || 0) + (wasFollowing ? -1 : 1));
+                    setProfileUser({
+                        ...profileUser,
+                        followersCount: newFollowersCount
+                    });
+                }
+                
+                // Sidebar'daki kendi followingCount'unu güncelle
+                setFollowingCount(prev => Math.max(0, prev + (wasFollowing ? -1 : 1)));
+                
+                // Takip durumunu güncelle
+                setIsFollowing(willFollow);
+            } catch (countError) {
+                console.error("Takip/takipçi sayıları güncellenirken hata:", countError);
+                // Hata olsa bile state'i güncelle (Firestore işlemi başarılı oldu)
+                setIsFollowing(willFollow);
+                if (profileUser) {
+                    const newFollowersCount = Math.max(0, (profileUser.followersCount || 0) + (wasFollowing ? -1 : 1));
+                    setProfileUser({
+                        ...profileUser,
+                        followersCount: newFollowersCount
+                    });
+                }
+                setFollowingCount(prev => Math.max(0, prev + (wasFollowing ? -1 : 1)));
+            }
         } catch (error) {
             console.error("Takip işlemi sırasında hata:", error);
             alert("Takip işlemi sırasında bir hata oluştu. Lütfen tekrar deneyin.");
@@ -132,109 +413,225 @@ export default function OtherProfilePage() {
         }
     };
 
-    if (loading || !profileUser) {
+    const handleLike = async (item) => {
+        if (!authUser?.uid) {
+            router.push('/giris');
+            return;
+        }
+        
+        try {
+            if (item.isLiked) {
+                await unlikeRecommendation(authUser.uid, item.id);
+                setRecommendations(prev => prev.map(rec => 
+                    rec.id === item.id 
+                        ? { ...rec, isLiked: false, likeCount: Math.max(0, (rec.likeCount || 0) - 1) }
+                        : rec
+                ));
+            } else {
+                await likeRecommendation(authUser.uid, item.id);
+                setRecommendations(prev => prev.map(rec => 
+                    rec.id === item.id 
+                        ? { ...rec, isLiked: true, likeCount: (rec.likeCount || 0) + 1 }
+                        : rec
+                ));
+
+                // Bildirim gönderme
+                if (item.userId && item.userId !== authUser.uid) {
+                    try {
+                        const currentUserProfile = await getUserProfile(authUser.uid);
+                        if (currentUserProfile) {
+                            await createLikeNotification(
+                                item.id,
+                                item.userId,
+                                authUser.uid,
+                                currentUserProfile.name || currentUserProfile.username || 'Kullanıcı',
+                                getAvatarUrlWithFallback(currentUserProfile.photoURL, currentUserProfile.name, currentUserProfile.username),
+                                item.title,
+                                item.imageUrl
+                            );
+                        }
+                    } catch (notifError) {
+                        console.error("Beğeni bildirimi gönderme hatası:", notifError);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Beğeni hatası:', error);
+            alert(error.message || 'Beğeni işlemi başarısız oldu.');
+        }
+    };
+
+    const handleSave = async (item) => {
+        if (!authUser?.uid) {
+            router.push('/giris');
+            return;
+        }
+        
+        try {
+            const isSaved = await isRecommendationSaved(authUser.uid, item.id);
+            if (isSaved) {
+                await unsaveRecommendation(authUser.uid, item.id);
+            } else {
+                await saveRecommendation(authUser.uid, item.id);
+            }
+        } catch (error) {
+            console.error('Kaydetme hatası:', error);
+        }
+    };
+
+    const profileAvatar = profileUser ? getAvatarUrlWithFallback(profileUser.photoURL, profileUser.name, profileUser.username) : 'https://ui-avatars.com/api/?name=?&background=random';
+    const myProfileAvatar = userProfile ? getAvatarUrlWithFallback(userProfile.photoURL, userProfile.name, userProfile.username) : 'https://ui-avatars.com/api/?name=?&background=random';
+
+    if (authLoading || loading) {
         return (
-            <div className="text-center py-10 flex flex-col items-center justify-center h-screen">
+            <div className="w-full min-h-screen bg-dark flex items-center justify-center">
                 <div className="loader"></div>
-                <p className="text-gray-500 mt-4">Profil yükleniyor...</p>
+            </div>
+        );
+    }
+
+    if (error || !profileUser) {
+        return (
+            <div className="w-full min-h-screen bg-dark flex flex-col items-center justify-center p-4">
+                <i className="fas fa-exclamation-circle text-4xl text-red-500 mb-4"></i>
+                <p className="text-red-500 text-center">{error || "Profil bulunamadı."}</p>
+                <Link href="/" className="mt-4 px-6 py-2 bg-primary text-light rounded-xl hover:bg-primary-dark transition-colors">
+                    Ana Sayfaya Dön
+                </Link>
             </div>
         );
     }
 
     return (
-        <div className="bg-white min-h-screen pb-20">
-            <header className="sticky top-0 z-10 bg-white/90 backdrop-blur-sm shadow-sm">
-                <div className="p-4 flex justify-between items-center">
-                    <button onClick={() => router.back()} className="text-gray-700 hover:bg-gray-100 w-10 h-10 flex items-center justify-center rounded-full">
-                        <i className="fas fa-arrow-left text-lg"></i>
-                    </button>
-                    <h1 className="text-xl font-bold text-gray-800 truncate px-2">@{profileUser.username}</h1>
-                    <div className="w-10"></div>
-                </div>
-            </header>
+        <div className="w-full min-h-screen bg-dark antialiased">
+            <Header 
+                authUser={authUser}
+                showBackButton={true}
+                backHref="/"
+                unreadCount={unreadCount}
+            />
 
-            <main className="p-4 md:p-6">
-                <div className="flex items-center space-x-4">
-                    <Image
-                        className="w-20 h-20 md:w-24 md:h-24 rounded-full border-2 border-gray-100 shadow flex-shrink-0"
-                        src={profileUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(profileUser.name || '?')}&background=random&color=fff`}
-                        alt={`${profileUser.name || 'Kullanıcı'} profil fotoğrafı`}
-                        width={96}
-                        height={96}
-                        unoptimized
+            <div className="flex flex-col lg:flex-row gap-4 sm:gap-6 p-3 sm:p-4 lg:p-6 max-w-7xl mx-auto">
+                {/* Sol Sidebar - Kendi Profilimiz */}
+                {authUser && (
+                    <Sidebar
+                        userProfile={userProfile}
+                        profileAvatar={myProfileAvatar}
+                        recommendationsCount={recommendationsCount}
+                        followersCount={followersCount}
+                        followingCount={followingCount}
+                        categories={categories}
+                        sidebarView={sidebarHook.sidebarView}
+                        sidebarUsers={sidebarHook.sidebarUsers}
+                        isLoadingSidebar={sidebarHook.isLoadingSidebar}
+                        savedRecommendations={sidebarHook.savedRecommendations}
+                        isLoadingSaved={sidebarHook.isLoadingSaved}
+                        onShowUsersList={(type) => sidebarHook.showUsersList(type)}
+                        onShowSavedList={sidebarHook.showSavedList}
+                        onShowProfile={() => sidebarHook.setSidebarView('profile')}
+                        onItemClick={(recId) => router.push(`/?rec=${recId}`)}
                     />
-                    <div className="flex-grow flex justify-around text-center">
-                        <div className="px-2">
-                            <p className="font-bold text-lg md:text-xl text-gray-800">{recommendations.length}</p>
-                            <p className="text-xs md:text-sm text-gray-500">Tavsiye</p>
-                        </div>
-                        <Link href={`/profil/${userId}/takipciler`} className="px-2">
-                            <p className="font-bold text-lg md:text-xl text-gray-800">{profileUser.followers?.length || 0}</p>
-                            <p className="text-xs md:text-sm text-gray-500">Takipçi</p>
-                        </Link>
-                        <Link href={`/profil/${userId}/takip-edilenler`} className="px-2">
-                            <p className="font-bold text-lg md:text-xl text-gray-800">{profileUser.following?.length || 0}</p>
-                            <p className="text-xs md:text-sm text-gray-500">Takip</p>
-                        </Link>
-                    </div>
-                </div>
-
-                <div className="mt-4">
-                    <h2 className="text-base font-bold text-gray-900">{profileUser.name}</h2>
-                    <p className="text-sm text-gray-700 mt-1">{profileUser.bio}</p>
-                </div>
-
-                {currentUserData && currentUserData.uid !== userId && (
-                    <div className="mt-4">
-                        <button
-                            onClick={handleFollowToggle}
-                            disabled={followLoading}
-                            className={`w-full font-bold py-2 px-4 rounded-lg transition-colors text-sm ${
-                                isFollowing
-                                    ? 'bg-gray-200 text-gray-800 hover:bg-gray-300'
-                                    : 'bg-teal-600 text-white hover:bg-teal-700'
-                            } ${followLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                            {followLoading ? 'İşleniyor...' : (isFollowing ? 'Takibi Bırak' : 'Takip Et')}
-                        </button>
-                    </div>
                 )}
-            </main>
 
-            <div className="border-t border-gray-200">
-                <div className="tabs flex justify-around">
-                    <button className="w-full py-3 text-sm font-semibold text-teal-600 border-b-2 border-teal-600">
-                        Tavsiyeler
-                    </button>
-                </div>
-            </div>
-
-            <div className="p-1 grid grid-cols-3 gap-1 min-h-[40vh]">
-                {recommendations.length > 0 ? (
-                    recommendations.map(rec => (
-                        <Link key={rec.id} href={`/tavsiye/${rec.id}`}>
-                            <div className="relative aspect-square bg-gray-100 rounded-sm overflow-hidden">
-                                {rec.imageUrl ? (
-                                    <Image
-                                        src={rec.imageUrl}
-                                        className="object-cover"
-                                        alt={rec.title || 'Tavsiye görseli'}
-                                        fill
-                                        sizes="(max-width: 768px) 33vw, 128px"
-                                    />
-                                ) : (
-                                    <div className="flex items-center justify-center w-full h-full">
-                                        <i className="fas fa-camera text-3xl text-gray-300"></i>
+                {/* Ana İçerik - Diğer Kullanıcının Profili */}
+                <main className="flex-1">
+                    <div className="bg-card border border-border rounded-xl sm:rounded-2xl p-4 sm:p-6 shadow-xl">
+                        {/* Profil Bilgileri */}
+                        <div className="flex items-start gap-4 mb-6">
+                            <div className="relative w-20 h-20 rounded-full border-3 border-primary p-1">
+                                <Image
+                                    src={profileAvatar}
+                                    alt={profileUser.name || 'Kullanıcı'}
+                                    width={80}
+                                    height={80}
+                                    className="rounded-full object-cover"
+                                    unoptimized
+                                />
+                            </div>
+                            <div className="flex-1">
+                                <div className="flex items-start justify-between gap-3 mb-2">
+                                    <div>
+                                        <h2 className="text-2xl font-bold text-light">{profileUser.name || "İsimsiz"}</h2>
+                                        {profileUser.username && (
+                                            <p className="text-base text-muted">@{profileUser.username}</p>
+                                        )}
                                     </div>
+                                </div>
+                                {profileUser.bio && (
+                                    <p className="text-sm text-muted mt-2">{profileUser.bio}</p>
                                 )}
                             </div>
-                        </Link>
-                    ))
-                ) : (
-                    <div className="col-span-3 text-center py-10 text-gray-500">
-                        Bu kullanıcının henüz hiç tavsiyesi yok.
+                        </div>
+
+                        {/* İstatistikler */}
+                        <div className="bg-dark rounded-2xl p-5 mb-6 border border-border">
+                            <div className="flex justify-around items-center">
+                                <div className="text-center">
+                                    <p className="text-2xl font-bold text-primary">{profileUser.recommendationsCount || recommendations.length}</p>
+                                    <p className="text-sm text-muted font-medium">Tavsiye</p>
+                                </div>
+                                <div className="w-px h-10 bg-border"></div>
+                                <Link href={`/profil/${userId}/takipciler`} className="text-center">
+                                    <p className="text-2xl font-bold text-primary">{profileUser.followersCount || 0}</p>
+                                    <p className="text-sm text-muted font-medium">Takipçi</p>
+                                </Link>
+                                <div className="w-px h-10 bg-border"></div>
+                                <Link href={`/profil/${userId}/takip-edilenler`} className="text-center">
+                                    <p className="text-2xl font-bold text-primary">{profileUser.followingCount || 0}</p>
+                                    <p className="text-sm text-muted font-medium">Takip</p>
+                                </Link>
+                            </div>
+                        </div>
+
+                        {/* Takip Et Butonu */}
+                        {authUser && authUser.uid !== userId && (
+                            <div className="mb-6">
+                                <button
+                                    onClick={handleFollowToggle}
+                                    disabled={followLoading}
+                                    className={`w-full font-bold py-3 px-4 rounded-xl transition-colors ${
+                                        isFollowing
+                                            ? 'bg-dark text-primary border border-border hover:bg-primary/20'
+                                            : 'bg-primary text-light hover:bg-primary-dark'
+                                    } ${followLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                >
+                                    {followLoading ? (
+                                        <span className="flex items-center justify-center gap-2">
+                                            <div className="spinner-sm"></div>
+                                            <span>İşleniyor...</span>
+                                        </span>
+                                    ) : (
+                                        isFollowing ? 'Takibi Bırak' : 'Takip Et'
+                                    )}
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Tavsiyeler */}
+                        <div className="space-y-4">
+                            {recommendations.length > 0 ? (
+                                recommendations.map((item) => (
+                                    <div key={item.id} onClick={() => router.push(`/?rec=${item.id}`)}>
+                                        <RecommendationCard
+                                            rec={item}
+                                            currentUserData={{ uid: authUser?.uid }}
+                                            onLike={() => handleLike(item)}
+                                            onSave={() => handleSave(item)}
+                                            onDelete={null}
+                                        />
+                                    </div>
+                                ))
+                            ) : (
+                                <div className="text-center py-10">
+                                    <div className="w-20 h-20 bg-dark rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                        <i className="fas fa-lightbulb text-3xl text-primary"></i>
+                                    </div>
+                                    <p className="text-muted">Bu kullanıcının henüz hiç tavsiyesi yok.</p>
+                                </div>
+                            )}
+                        </div>
                     </div>
-                )}
+                </main>
             </div>
         </div>
     );
